@@ -1,0 +1,35 @@
+{
+  "name": "dental-cpr-web",
+  "private": true,
+  "version": "0.0.0",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "backend:package": "backend/.venv/bin/python scripts/package_backend.py",
+    "package:mac": "npm run build && npm run backend:package && electron-builder --mac",
+    "package:win": "npm run build && npm run backend:package && electron-builder --win"
+  },
+  "dependencies": {
+    "@kitware/vtk.js": "^37.4.6"
+  },
+  "devDependencies": {
+    "electron": "^40.10.6",
+    "electron-builder": "^26.15.3",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.1.12"
+  },
+  "build": {
+    "appId": "com.pineclinic.cpr",
+    "protocols": [{ "name": "PineClinic Lokal Servisler", "schemes": ["pineclinic"] }],
+    "productName": "PineClinic Lokal Servisler",
+    "files": ["electron/**", "package.json"],
+    "extraResources": [{ "from": "release/backend", "to": "backend", "filter": ["**/*"] }],
+    "mac": { "target": ["dmg"], "category": "public.app-category.healthcare-fitness" },
+    "win": { "target": ["nsis"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}

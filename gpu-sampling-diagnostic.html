@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>GPU sampling diagnostic</title>
+<style>body{background:#111;color:#ddd;font:14px monospace;margin:24px}pre{white-space:pre-wrap}canvas{display:none}</style>
+<h1>GPU sampling diagnostic</h1>
+<p>Synthetic data only. Checks CPU/GPU pixel agreement and compares completed GPU frame times against the previous nearest-neighbor shader.</p>
+<pre id="result">Running…</pre>
+<script type="module">
+import { GpuPanoramaRenderer } from './src/cprGpu.ts';
+import { renderPanorama } from './src/cpr.ts';
+
+const result = document.querySelector('#result');
+const canvas = () => { const c = document.createElement('canvas'); document.body.append(c); return c; };
+const volume = (nx, ny, nz) => {
+  const data = new Float32Array(nx * ny * nz);
+  for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++)
+    data[x + nx * (y + ny * z)] = Math.round(350 + 1400 * Math.sin(x * 0.31) * Math.cos(y * 0.27) + z * 2);
+  return { data, nx, ny, nz, sx: 0.25, sy: 0.25, sz: 0.25, origin: [0,0,0], direction: [1,0,0,0,1,0,0,0,1] };
+};
+const curve = (points) => ({ points, normals: points.map(() => [0.6, 0.8]), tangents: points.map(() => [0.8, -0.6]), length: points.length * 0.25 });
+const wl = { center: 500, width: 4000 };
+const rgba = (c) => {
+  const gl = c.getContext('webgl2'), pixels = new Uint8Array(c.width * c.height * 4);
+  gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  const error = gl.getError();
+  if (error !== gl.NO_ERROR) throw new Error(`WebGL error ${error}`);
+  return pixels;
+};
+const compare = (renderer, c, v, arch, slab) => {
+  if (!renderer.render(v, arch, slab, wl)) throw new Error('WebGL2 renderer unavailable');
+  const pixels = rgba(c), cpu = renderPanorama(v, arch, slab);
+  let maxDelta = 0, beyondQuantization = 0;
+  for (let y = 0; y < v.nz; y++) for (let x = 0; x < arch.points.length; x++) {
+    const expected = Math.max(0, Math.min(255, (cpu.data[(v.nz - 1 - y) * cpu.w + x] - (wl.center - wl.width / 2)) * 255 / wl.width)) | 0;
+    const delta = Math.abs(pixels[(y * cpu.w + x) * 4] - expected);
+    maxDelta = Math.max(maxDelta, delta);
+    if (delta > 1) beyondQuantization++;
+  }
+  return { maxGreyLevelDelta: maxDelta, beyondQuantization, passed: beyondQuantization === 0 };
+};
+const benchmark = (renderer, c, v, arch) => {
+  const slab = { thicknessMm: 6, mode: 'mean' }, gl = c.getContext('webgl2');
+  // Readback forces completed work, including browser/driver synchronization;
+  // gl.finish alone can measure command submission rather than the draw.
+  const pixel = new Uint8Array(4);
+  const complete = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+  for (let i = 0; i < 3; i++) { renderer.render(v, arch, slab, wl); complete(); }
+  const elapsed = [];
+  for (let i = 0; i < 9; i++) {
+    const start = performance.now();
+    renderer.render(v, arch, slab, wl); complete();
+    elapsed.push(performance.now() - start);
+  }
+  elapsed.sort((a,b) => a-b);
+  return { medianMs: Number(elapsed[4].toFixed(2)), minMs: Number(elapsed[0].toFixed(2)), maxMs: Number(elapsed[8].toFixed(2)) };
+};
+
+try {
+  const c = canvas(), renderer = new GpuPanoramaRenderer(c), v = volume(48, 44, 12);
+  const arch = curve(Array.from({length:81}, (_,i) => [2.113 + i * 0.09, 4.067 + Math.sin(i * 0.09)]));
+  const edge = curve([[-0.025,2], [0,2], [0.025,2], [(v.nx-1)*v.sx,2], [(v.nx-1)*v.sx+0.025,2], [2,-0.025], [2,(v.ny-1)*v.sy+0.025]]);
+  const checks = {
+    obliqueMean: compare(renderer, c, v, arch, { thicknessMm: 6, mode:'mean' }),
+    obliqueMax: compare(renderer, c, v, arch, { thicknessMm: 6, mode:'max' }),
+    subvoxelAndEdges: compare(renderer, c, v, edge, { thicknessMm: 0, mode:'mean' }),
+  };
+  // Vite serves transpiled JS for this module. Change only its GLSL sampling
+  // function to compare the exact previous shader using the same renderer.
+  const js = await (await fetch('/src/cprGpu.ts')).text();
+  const oldSample = `float sampleVolume(vec3 voxel) {
+    vec3 coordinate = (voxel + vec3(0.5)) / vec3(dimensions);
+    if (any(lessThan(coordinate, vec3(0.0))) || any(greaterThan(coordinate, vec3(1.0)))) return -1000.0;
+    return float(texture(volumeTex, coordinate).r) - 32768.0;
+  }`;
+  const baseline = js.replace(/float sampleVolume\(vec3 voxel\) \{[\s\S]*?\n\}/, oldSample);
+  if (baseline === js) throw new Error('Could not construct previous-shader baseline');
+  const blobUrl = URL.createObjectURL(new Blob([baseline], {type:'text/javascript'}));
+  const { GpuPanoramaRenderer: PreviousRenderer } = await import(/* @vite-ignore */ blobUrl);
+  URL.revokeObjectURL(blobUrl);
+  const oldCanvas = canvas(), oldRenderer = new PreviousRenderer(oldCanvas);
+  const previousChecks = {
+    obliqueMean: compare(oldRenderer, oldCanvas, v, arch, { thicknessMm:6, mode:'mean' }),
+    obliqueMax: compare(oldRenderer, oldCanvas, v, arch, { thicknessMm:6, mode:'max' }),
+    subvoxelAndEdges: compare(oldRenderer, oldCanvas, v, edge, { thicknessMm:0, mode:'mean' }),
+  };
+  const perfVolume = volume(128,128,400);
+  const perfArch = curve(Array.from({length:502}, (_,i) => [16 + 11*Math.cos(i/501*Math.PI), 16 - 11*Math.sin(i/501*Math.PI)]));
+  const previousTiming = benchmark(oldRenderer, oldCanvas, perfVolume, perfArch);
+  const updatedTiming = benchmark(renderer, c, perfVolume, perfArch);
+  result.textContent = JSON.stringify({ passed:Object.values(checks).every(x=>x.passed), checks, previousChecks,
+    timing:{ note:'Synthetic 128×128×400 source; 502×400 output; 25 slab samples; nine warmed frames with synchronous one-pixel readback. Includes browser/driver readback overhead; device/load dependent.', previous:previousTiming, updated:updatedTiming },
+    gpuSlabSamples:25, textureReadsPerSample:{previous:1, updated:4}, userAgent:navigator.userAgent }, null, 2);
+} catch (error) { result.textContent = String(error.stack || error); }
+</script>
+</html>

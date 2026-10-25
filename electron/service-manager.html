@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>PineClinic Lokal Servisler</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0e14;color:#e6ebf5}
+body{margin:0;padding:28px;background:radial-gradient(900px 500px at 0 -20%,#17223d,#0b0e14 65%)}
+main{max-width:760px;margin:auto}
+h1{margin:0;font-size:21px}.sub{margin:7px 0 0;color:#8a96b2;font-size:13px;line-height:1.5}
+.card{margin-top:18px;padding:18px;border:1px solid #263049;border-radius:14px;background:#131824}
+.state{font-size:16px;font-weight:600;display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.state small{flex-basis:100%;margin-top:2px;color:#8a96b2;font-weight:400;font-size:12px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#7e8aa3}
+.dot.running{background:#35e0a1}.dot.starting{background:#ffd34d}.dot.stopping{background:#ff9a3c}.dot.error{background:#ff5d73}
+.badge{font-size:11px;font-weight:500;padding:3px 8px;border-radius:999px;border:1px solid #263049;color:#c9d4e8;background:#1a2132}
+button{padding:9px 14px;border:1px solid #263049;border-radius:9px;background:#1a2132;color:#e6ebf5;font:500 13px inherit;cursor:pointer}
+button.primary{background:#35e0a1;color:#04130d;border:0}button.small{padding:5px 10px;font-size:12px}button:disabled{opacity:.45;cursor:default}
+.actions{display:flex;gap:9px;margin-top:16px}
+h2{margin:0 0 10px;font-size:12px;letter-spacing:1.1px;text-transform:uppercase;color:#8a96b2;font-weight:600}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #1d2638;font-size:13px}.row:first-of-type{border-top:0}
+.row .meta{min-width:0;flex:1}.row .meta b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row .meta span{color:#8a96b2;font-size:12px}
+.empty{color:#6c7893;font-size:12px}
+.bar{height:6px;border-radius:99px;background:#1d2638;margin-top:7px;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,#1fbf87,#35e0a1);transition:width .2s}
+.log{height:220px;overflow:auto;white-space:pre-wrap;margin:0;padding:12px;border:1px solid #263049;border-radius:9px;background:#080b11;color:#c9d4e8;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.notice{margin:18px 0 0;color:#8a96b2;font-size:12px;line-height:1.55}
+</style></head><body><main>
+<h1>PineClinic Lokal Servisler</h1>
+<p class="sub">DICOM processing and optional AI run only on this computer. This application has no clinical viewer.</p>
+
+<section class="card">
+  <div class="state"><span id="dot" class="dot"></span><span id="state">Stopped</span><span id="engine" class="badge" hidden></span><span id="viewers" class="badge" hidden></span><small id="detail">Start the service when a local viewer needs it.</small></div>
+  <div class="actions"><button id="start" class="primary">Start service</button><button id="stop">Stop service</button></div>
+</section>
+
+<section class="card" id="jobs-card" hidden><h2>AI segmentation</h2><div id="jobs"></div></section>
+<section class="card" id="datasets-card" hidden><h2>Open cases</h2><div id="datasets"></div></section>
+<section class="card"><h2>Log</h2><pre id="log" class="log">No service log yet.</pre></section>
+<p class="notice">The service uses a loopback address only. Patient volumes are not uploaded or sent to a remote server.</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const label = { stopped: 'Stopped', starting: 'Starting…', running: 'Running', stopping: 'Stopping…', error: 'Error' };
+const esc = (text) => String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const leaf = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
+const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+let last;
+
+function render(s) {
+  last = s;
+  $('dot').className = 'dot ' + s.state;
+  $('state').textContent = label[s.state] || s.state;
+  const live = s.state === 'running';
+  $('detail').textContent = s.detail || (live ? `Listening locally at ${s.apiBase}` : s.state === 'stopping' ? 'Cancelling work and notifying viewers…' : 'Start the service when a local viewer needs it.');
+  $('engine').hidden = !(live && s.provider && s.provider !== 'none'); $('engine').textContent = s.provider || '';
+  $('viewers').hidden = !live; $('viewers').textContent = `${s.viewers} viewer${s.viewers === 1 ? '' : 's'} connected`;
+  $('start').disabled = ['running', 'starting', 'stopping'].includes(s.state);
+  $('stop').disabled = ['stopped', 'stopping'].includes(s.state);
+  $('log').textContent = s.logs.length ? s.logs.join('\n') : 'No service log yet.';
+
+  const active = (s.jobs || []).filter((j) => j.state === 'queued' || j.state === 'running');
+  $('jobs-card').hidden = !live || !active.length;
+  $('jobs').innerHTML = active.map((j) => {
+    const ds = (s.datasets || []).find((d) => d.datasetId === j.datasetId);
+    return `<div class="row"><div class="meta"><b>${esc(ds ? leaf(ds.source) : 'Case')}</b><span>${esc(j.provider || 'preparing')} · ${esc(j.stage)} · ${Math.round(j.progress * 100)}%${j.startedAt ? ' · ' + mmss(Date.now() / 1000 - j.startedAt) : ''}</span><div class="bar"><i style="width:${Math.round(j.progress * 100)}%"></i></div></div><button class="small" data-cancel="${esc(j.jobId)}">Cancel</button></div>`;
+  }).join('');
+
+  $('datasets-card').hidden = !live || !(s.datasets || []).length;
+  $('datasets').innerHTML = (s.datasets || []).map((d) => `<div class="row"><div class="meta"><b>${esc(leaf(d.source))}</b><span>${d.dimensions.join(' × ')} · ${new Date(d.openedAt * 1000).toLocaleTimeString()}</span></div><button class="small" data-release="${esc(d.datasetId)}">Release</button></div>`).join('');
+}
+
+document.addEventListener('click', (event) => {
+  const cancel = event.target.closest('[data-cancel]'), release = event.target.closest('[data-release]');
+  if (cancel) window.pineclinic.cancelJob(cancel.dataset.cancel);
+  if (release) window.pineclinic.releaseDataset(release.dataset.release);
+});
+$('start').onclick = () => window.pineclinic.startService();
+$('stop').onclick = () => window.pineclinic.stopService();
+window.pineclinic.serviceStatus().then(render);
+window.pineclinic.onServiceUpdate(render);
+setInterval(() => { if (last && (last.jobs || []).some((j) => j.state === 'running')) render(last); }, 1000); // elapsed time
+</script></body></html>
