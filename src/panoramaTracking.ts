@@ -53,6 +53,9 @@ export function trackMandible(v: Volume, arch: ArchResult, anchorZ: number): voi
   const cols = arch.points.length, values = new Float32Array(nc * nr), valid = new Uint8Array(nc * nr);
   const limit = 32, step = 0.5, samples = Math.round(2 * limit / step) + 1;
   const superior = Math.sign(v.direction[8]);
+  const isMandible = v.maskSchema === 'dental-segmentator-v1'
+    ? (m: number) => m === 2 || m === 4 || m === 5
+    : (m: number) => m > 0;
   for (let c = 0; c < nc; c++) {
     const index = Math.round(c * (cols - 1) / (nc - 1)), p = arch.points[index], n = arch.normals[index];
     const pixels = new Int32Array(samples).fill(-1);
@@ -66,10 +69,10 @@ export function trackMandible(v: Volume, arch: ArchResult, anchorZ: number): voi
       const base = z * v.nx * v.ny;
       let bestScore = Infinity, bestOffset = 0;
       for (let start = 0; start < samples; start++) {
-        if (pixels[start] < 0 || !v.mask[base + pixels[start]]) continue;
+        if (pixels[start] < 0 || !isMandible(v.mask[base + pixels[start]])) continue;
         let end = start, gap = 0, hits = 0;
         for (let k = start; k < samples; k++) {
-          if (pixels[k] >= 0 && v.mask[base + pixels[k]]) { end = k; gap = 0; hits++; }
+          if (pixels[k] >= 0 && isMandible(v.mask[base + pixels[k]])) { end = k; gap = 0; hits++; }
           else if (++gap > 3) break; // tolerate ≤1.5 mm holes, not separate bones
         }
         const lo = -limit + start * step, hi = -limit + end * step, width = hi - lo;

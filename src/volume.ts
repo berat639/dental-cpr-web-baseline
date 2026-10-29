@@ -12,6 +12,7 @@ export interface Volume {
   datasetId?: string;
   /** Optional AI jaw mask (same grid, x-fastest). */
   mask?: Uint8Array;
+  maskSchema?: 'mandible-v1' | 'dental-segmentator-v1';
 }
 
 export const idx = (v: Volume, x: number, y: number, z: number) => x + v.nx * (y + v.ny * z);

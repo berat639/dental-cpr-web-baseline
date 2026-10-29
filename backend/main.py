@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import onnx_infer
+import dental_infer
 import mps_infer
 from sync import HEARTBEAT_SECONDS, EventBus, FolderPickBroker, sse
 
@@ -36,7 +38,7 @@ ENGINE = os.environ.get("TS_ENGINE", "auto").lower()
 EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cbct-ai")
 
 # Viewer and manager compare these to detect a restarted or incompatible service.
-API_VERSION = 2
+API_VERSION = 3
 INSTANCE_ID = uuid.uuid4().hex
 
 
@@ -83,11 +85,16 @@ class Job:
     started_at: float | None = None
     finished_at: float | None = None
     mask: np.ndarray | None = None
+    mask_schema: str = "mandible-v1"
     cancel_requested: bool = False
 
 
 DATASETS: dict[str, Dataset] = {}
 JOBS: dict[str, Job] = {}
+# Exact result cache for the current local-service session.  It has one entry,
+# is never written to disk, and is keyed by the full source fingerprint, so a
+# segmentation can only be reused for the identical DICOM series.
+RESULT_CACHE: OrderedDict[tuple[str, str], tuple[np.ndarray, str, str]] = OrderedDict()
 STORE_LOCK = threading.Lock()
 
 
@@ -187,10 +194,10 @@ app.add_middleware(
     CORSMiddleware,
     # Electron's packaged renderer has the opaque `null` origin. The service
     # still binds only to loopback, so images never leave this computer.
-    allow_origins=["http://localhost:5180", "http://127.0.0.1:5180", "null"],
+    allow_origins=["http://localhost:5180", "http://127.0.0.1:5180", "http://localhost:5173", "http://127.0.0.1:5173", "null"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Nx", "X-Ny", "X-Nz", "X-Sx", "X-Sy", "X-Sz", "X-Origin", "X-Direction", "Content-Length"],
+    expose_headers=["X-Nx", "X-Ny", "X-Nz", "X-Sx", "X-Sy", "X-Sz", "X-Origin", "X-Direction", "X-Segmentation-Schema", "Content-Length"],
 )
 
 
@@ -289,16 +296,18 @@ def volume_response(image: sitk.Image) -> Response:
     )
 
 
-def mask_response(mask: np.ndarray) -> Response:
+def mask_response(mask: np.ndarray, schema: str) -> Response:
     nz, ny, nx = mask.shape
     return Response(
         content=np.ascontiguousarray(mask).tobytes(),
         media_type="application/octet-stream",
-        headers={"X-Nx": str(nx), "X-Ny": str(ny), "X-Nz": str(nz)},
+        headers={"X-Nx": str(nx), "X-Ny": str(ny), "X-Nz": str(nz), "X-Segmentation-Schema": schema},
     )
 
 
 def selected_engine() -> tuple[str, str]:
+    if ENGINE in {"auto", "dental"} and dental_infer.available():
+        return "dental", dental_infer.provider_name()
     # Core ML is not used for this 3D graph. Apple Silicon uses the source
     # checkpoint with PyTorch/MPS; Windows can use an installed ONNX GPU EP.
     if ENGINE in {"auto", "mps"} and mps_infer.available():
@@ -348,7 +357,12 @@ def _run_segmentation(job_id: str) -> None:
             with STORE_LOCK:
                 return job.cancel_requested
 
-        infer = mps_infer.segment_mandible if engine == "mps" else onnx_infer.segment_mandible
+        if engine == "dental":
+            infer, job.mask_schema = dental_infer.segment_dental, "dental-segmentator-v1"
+        elif engine == "mps":
+            infer, job.mask_schema = mps_infer.segment_mandible, "mandible-v1"
+        else:
+            infer, job.mask_schema = onnx_infer.segment_mandible, "mandible-v1"
         mask = infer(dataset.image, log=log, on_progress=progress, is_cancelled=cancelled)
         with STORE_LOCK:
             if job.cancel_requested:
@@ -356,6 +370,9 @@ def _run_segmentation(job_id: str) -> None:
                 return
         with STORE_LOCK:
             job.mask, job.state, job.stage, job.progress, job.finished_at = mask, "done", "complete", 1.0, time.time()
+            RESULT_CACHE[(dataset.fingerprint, engine)] = (mask, job.mask_schema, provider)
+            while len(RESULT_CACHE) > 1:
+                RESULT_CACHE.popitem(last=False)
     except onnx_infer.SegmentationCancelled:
         with STORE_LOCK:
             job.state, job.stage, job.finished_at = "cancelled", "cancelled", time.time()
@@ -370,11 +387,11 @@ def health() -> dict[str, object]:
     engine, provider = selected_engine()
     return {
         "status": "ok", "localOnly": True, "engine": engine, "provider": provider,
-        "resultCacheEnabled": False,
+        "resultCacheEnabled": True,
         "mpsAvailable": onnx_infer.mps_available(),
         "instanceId": INSTANCE_ID, "apiVersion": API_VERSION, "codeVersion": CODE_VERSION, "startedAt": STARTED_AT,
         "clients": BUS.counts(),
-        "note": "The browser never receives a model. MPS uses the local PyTorch checkpoint; ONNX uses its selected local provider.",
+        "note": "The browser never receives a model. DentalSegmentator runs locally and returns only its segmentation labels.",
     }
 
 
@@ -493,11 +510,21 @@ def delete_dataset(dataset_id: str) -> dict[str, bool]:
 
 @app.post("/api/datasets/{dataset_id}/jobs/segment")
 def start_segmentation(dataset_id: str) -> dict[str, object]:
-    get_dataset(dataset_id)
+    dataset = get_dataset(dataset_id)
     job_id = uuid.uuid4().hex
+    engine, provider = selected_engine()
     with STORE_LOCK:
         job = JOBS[job_id] = Job(dataset_id=dataset_id)
+        cached = RESULT_CACHE.get((dataset.fingerprint, engine))
+        if cached:
+            mask, schema, cached_provider = cached
+            RESULT_CACHE.move_to_end((dataset.fingerprint, engine))
+            job.mask, job.mask_schema, job.provider = mask, schema, cached_provider
+            job.state, job.stage, job.progress = "done", "reused exact local result", 1.0
+            job.started_at = job.finished_at = time.time()
     publish_job(job_id, job)
+    if cached:
+        return {"jobId": job_id, "state": "done", "reused": True}
     EXECUTOR.submit(run_segmentation, job_id)
     return {"jobId": job_id, "state": "queued"}
 
@@ -537,7 +564,7 @@ def get_job_mask(job_id: str) -> Response:
         if job.state != "done" or job.mask is None:
             raise HTTPException(409, f"Mask is not ready ({job.state})")
         mask = job.mask
-    return mask_response(mask)
+    return mask_response(mask, job.mask_schema)
 
 
 if __name__ == "__main__":

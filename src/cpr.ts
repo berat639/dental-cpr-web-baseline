@@ -125,19 +125,27 @@ export function assessArchEvidence(arch: ArchResult, evidence: Pt[], radiusMm = 
   };
 }
 
-function slabSample(v: Volume, p: Pt, n: Pt, zVox: number, slab: Slab, offsetMm: number, maxSteps = Infinity): number {
+function slabSample(v: Volume, p: Pt, n: Pt, zVox: number, slab: Slab, offsetMm: number, maxSteps = Infinity, xrayWeighted = false): number {
   const halfMm = slab.thicknessMm / 2;
   // `maxSteps` gives a coarser (draft) slab while the user is dragging; the full slab is rendered once idle.
   const steps = Math.max(1, Math.min(maxSteps, Math.round(halfMm / Math.min(v.sx, v.sy))));
-  let acc = slab.mode === 'max' ? -Infinity : 0, cnt = 0;
+  let acc = slab.mode === 'max' ? -Infinity : 0, weightSum = 0;
   // slab is along the tangent direction for cross-sections and along the normal for panorama
   for (let s = -steps; s <= steps; s++) {
     const o = (s / steps) * halfMm + offsetMm;
     const val = sample(v, (p[0] + n[0] * o) / v.sx, (p[1] + n[1] * o) / v.sy, zVox);
-    acc = slab.mode === 'max' ? Math.max(acc, val) : acc + val;
-    cnt++;
+    if (slab.mode === 'max') {
+      acc = Math.max(acc, val);
+    } else if (xrayWeighted) {
+      const w = Math.max(0.05, Math.min(1.5, (val + 300) / 1500));
+      acc += val * w;
+      weightSum += w;
+    } else {
+      acc += val;
+      weightSum += 1;
+    }
   }
-  return slab.mode === 'max' ? acc : acc / cnt;
+  return slab.mode === 'max' ? acc : acc / Math.max(weightSum, 1e-6);
 }
 
 /** Panoramic image: columns = arch positions, rows = z (top = highest). Returns HU. */
@@ -146,7 +154,7 @@ export function renderPanorama(v: Volume, arch: ArchResult, slab: Slab, maxSteps
   const data = new Float32Array(w * h);
   for (let i = 0; i < w; i++)
     for (let r = 0; r < h; r++)
-      data[(h - 1 - r) * w + i] = slabSample(v, arch.points[i], arch.normals[i], r, slab, panoramaOffset(arch, i, r, slab.trackMandible), maxSteps);
+      data[(h - 1 - r) * w + i] = slabSample(v, arch.points[i], arch.normals[i], r, slab, panoramaOffset(arch, i, r, slab.trackMandible), maxSteps, true);
   return { data, w, h };
 }
 

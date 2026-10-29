@@ -13,7 +13,7 @@ class FakeEventSource {
   static get last() { return FakeEventSource.instances[FakeEventSource.instances.length - 1]; }
 }
 
-const hello = (instanceId: string, apiVersion = 2) => ({ instanceId, apiVersion, engine: 'onnx', provider: 'CPU', startedAt: 1, clients: { viewers: 1 }, datasets: [], jobs: [] });
+const hello = (instanceId: string, apiVersion = 3) => ({ instanceId, apiVersion, engine: 'onnx', provider: 'CPU', startedAt: 1, clients: { viewers: 1 }, datasets: [], jobs: [] });
 
 async function freshLink() {
   vi.resetModules();

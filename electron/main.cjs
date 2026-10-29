@@ -8,7 +8,7 @@ app.name = 'PineClinic Lokal Servisler';
 
 const PORT = 8000;
 const BASE = `http://127.0.0.1:${PORT}`;
-const API_VERSION = 2;
+const API_VERSION = 3;
 
 let windowRef;
 let service;

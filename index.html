@@ -62,6 +62,7 @@
         <div class="tools" aria-label="Axial tools">
           <button class="tool" data-pop="pop-axial" title="Çene, pencere ve arch ayarları">◐</button>
           <button class="tool" id="tool-redetect" title="Arch'ı yeniden tespit et">⟲</button>
+          <button class="tool" id="tool-occlusal" title="Oklüzal B-spline: tüm diş segmentasyonundan alternatif arch tespit et">⌁</button>
           <button class="tool" id="tool-reseed" title="Kontrol noktalarını sıfırla">⋯</button>
         </div>
         <div class="stage" id="stage-axial"><canvas id="cv-axial"></canvas><canvas class="overlay" id="ov-axial"></canvas></div>
@@ -111,7 +112,7 @@
       <label>Arch kanıt kalınlığı (mm) <output id="o-arch-slab">10</output><input id="in-arch-slab" type="range" min="2" max="40" value="10" /></label>
     </div>
     <div class="popover" id="pop-pano" hidden>
-      <label>Panorama kalınlığı (mm) <output id="o-thick">6</output><input id="in-thick" type="range" min="0" max="15" value="6" step="0.5" /></label>
+      <label>Panorama kalınlığı (mm) <output id="o-thick">20</output><input id="in-thick" type="range" min="0" max="35" value="20" step="0.5" /></label>
       <label class="inline"><input id="in-max" type="checkbox" /> MIP (ortalama yerine)</label>
       <label class="inline"><input id="in-tracking" type="checkbox" checked disabled /> Alt çene gövdesini takip et</label>
       <small>Yeşil bant bu kesitte örneklenen bölgedir. Sarı noktalar diş arkını düzenler.</small>

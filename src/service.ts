@@ -1,6 +1,8 @@
 /** Live link to the local service (Server-Sent Events). One instance per viewer tab. */
 export const API: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8000';
-export const API_VERSION = 2;
+// v3 adds a segmentation-schema header. The viewer uses it to select the
+// tooth-label path instead of treating every mask as a mandible mask.
+export const API_VERSION = 3;
 
 export type Conn = 'offline' | 'connecting' | 'online' | 'stopping' | 'incompatible';
 

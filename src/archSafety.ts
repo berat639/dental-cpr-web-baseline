@@ -74,10 +74,10 @@ export function cleanDentalEvidence(points: Pt[], opts: { cellMm?: number; openM
 export interface ArchPlausibility { ok: boolean; reason?: string; lengthMm: number; depthMm: number; chordMm: number; turningDeg: number; }
 
 /** Anatomical sanity of a candidate curve: rejects loops, spirals, skull outlines and absurd sizes. */
-export function assessArchPlausibility(arch: ArchResult, opts: { aiMask?: boolean } = {}): ArchPlausibility {
+export function assessArchPlausibility(arch: ArchResult, opts: { aiMask?: boolean; toothLabels?: boolean } = {}): ArchPlausibility {
   // Without an AI mask the curve spans teeth only (molar to molar + short extensions): tighter bounds than the
   // mask-guided curve, which also follows the rami.
-  const maxLen = opts.aiMask ? 240 : 180, minDepthRatio = opts.aiMask ? 0.74 : 1.1;
+  const maxLen = opts.aiMask || opts.toothLabels ? 250 : 180, minDepthRatio = opts.toothLabels ? 0.25 : opts.aiMask ? 0.45 : 0.38;
   const pts = arch.points, n = pts.length;
   const a = pts[0], b = pts[n - 1];
   const chord = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-6;
@@ -108,9 +108,7 @@ export function assessArchPlausibility(arch: ArchResult, opts: { aiMask?: boolea
   // A dental arch from molar to molar with posterior extensions: ~80-230 mm long, a single non-self-intersecting U.
   if (arch.length < 60 || arch.length > maxLen) return { ok: false, reason: `arch uzunluğu ${arch.length.toFixed(0)} mm (beklenen 60–${maxLen})`, ...result };
   if (selfCross || result.turningDeg > 450) return { ok: false, reason: `eğri kendini kesiyor/döngülü (${result.turningDeg.toFixed(0)}° dönüş)`, ...result };
-  // Real arches (measured on the available CBCTs) have 35-80 mm AP depth and an end-to-end chord <= ~0.85 x depth.
-  // Skull outlines / sinus walls misread as an arch are shallow or wide and fail one of these.
-  if (depth < 28) return { ok: false, reason: `eğri çok sığ (${depth.toFixed(0)} mm derinlik)`, ...result };
-  if (depth / chord < minDepthRatio || depth / chord > 2.4) return { ok: false, reason: 'eğri U şekline benzemiyor', ...result };
+  if (depth < (opts.toothLabels ? 15 : 24)) return { ok: false, reason: `eğri çok sığ (${depth.toFixed(0)} mm derinlik)`, ...result };
+  if (depth / chord < minDepthRatio || depth / chord > 1.8) return { ok: false, reason: 'eğri U şekline benzemiyor', ...result };
   return { ok: true, ...result };
 }

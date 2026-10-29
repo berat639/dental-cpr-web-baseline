@@ -1,6 +1,7 @@
 import './style.css';
 import { splineArch, type ArchResult, type Pt } from './arch/arch';
 import { searchArch } from './archDetect';
+import { searchOcclusalSplineArch } from './archOcclusal';
 import { panoramaOffset, panoramaPoint, trackMandible } from './panoramaTracking';
 import {
   archFrameAt, findOcclusalSlice, renderCrossAt, renderPanorama, sectionNumber, toCanvas,
@@ -370,12 +371,12 @@ function drawCross(resample = true, interactive = false) {
   let draft = false;
   crossCells.forEach((c, k) => {
     if (!volume || !currentArch) { prepOverlay(c.ov); c.cv.width = 1; c.cv.height = 1; return; }
-    const s = slab(), wl = windowLevel();
-    if (renderer.renderCross(c.cv, volume, archFrameAt(currentArch, secs[k].s), half(), s, wl)) {
+    const s = slab(), wl = windowLevel(), crossSlab = { ...s, thicknessMm: Math.min(s.thicknessMm, 2) };
+    if (renderer.renderCross(c.cv, volume, archFrameAt(currentArch, secs[k].s), half(), crossSlab, wl)) {
       crossImgs[k] = null;
     } else {
       if (resample || !crossImgs[k]) {
-        crossImgs[k] = renderCrossAt(volume, currentArch, secs[k].s, half(), s.thicknessMm, s.mode, interactive ? 2 : Infinity);
+        crossImgs[k] = renderCrossAt(volume, currentArch, secs[k].s, half(), crossSlab.thicknessMm, s.mode, interactive ? 2 : Infinity);
         if (interactive) draft = true;
       }
       toCanvas(c.cv, crossImgs[k]!, wl);
@@ -488,9 +489,14 @@ function loadJaw(which: Jaw = selectedJaw) {
 }
 function seedControls() {
   if (!currentArch) return;
-  if (currentArch.controls) { controlPoints = currentArch.controls.map(p => [...p] as Pt); return; }
-  const count = 9, last = currentArch.points.length - 1;
-  controlPoints = Array.from({ length: count }, (_, i) => [...currentArch!.points[Math.round((i * last) / (count - 1))]] as Pt);
+  const count = 17, last = currentArch.points.length - 1;
+  controlPoints = currentArch.controls?.length === count
+    ? currentArch.controls.map((p) => [...p] as Pt)
+    : Array.from({ length: count }, (_, i) => [...currentArch!.points[Math.round((i * last) / (count - 1))]] as Pt);
+  const pano = currentArch.panorama;
+  currentArch = splineArch(controlPoints, currentArch.points.length);
+  currentArch.controls = controlPoints.map((p) => [...p] as Pt);
+  if (pano) currentArch.panorama = pano;
 }
 function autoSlice(): number {
   if (!volume) return 0;
@@ -504,6 +510,7 @@ async function detectArch(): Promise<boolean> {
   const token = ++detectToken;
   if (!volume) return false;
   const v = volume;
+  if (v.maskSchema === 'dental-segmentator-v1') return detectOcclusalSplineArch();
   const input = $<HTMLInputElement>('in-slice');
   const z = Math.max(0, Math.min(v.nz - 1, Number.isFinite(Number(input.value)) ? num('in-slice') : autoSlice()));
   // The bundled model is mandible only; never imply the same mask identifies the maxilla.
@@ -530,6 +537,32 @@ async function detectArch(): Promise<boolean> {
   refresh();
   const label = useMandibleMask ? 'Alt çene arch\'ı (AI maskesi)' : 'Otomatik arch (çene doğrulanmadı)';
   setCaseInfo(`${caseSummary()} · ${label}`);
+  return true;
+}
+
+/** Uses every tooth-label height and a B-spline, independent of the selected axial slab. */
+async function detectOcclusalSplineArch(): Promise<boolean> {
+  const token = ++detectToken;
+  if (!volume) return false;
+  const v = volume;
+  if (v.maskSchema !== 'dental-segmentator-v1' || !v.mask) {
+    toast('Oklüzal B-spline yöntemi DentalSegmentator diş maskesini gerektirir.', 'warn');
+    return false;
+  }
+  toast('Oklüzal diş projeksiyonu ve B-spline hesaplanıyor…', 'info', 5000);
+  const result = await searchOcclusalSplineArch(v, jaw() === 'upper' ? 3 : 4, () => token !== detectToken || volume !== v);
+  if (token !== detectToken || volume !== v) return false;
+  if (!result.arch) {
+    toast(`Oklüzal B-spline arch reddedildi: ${result.reason ?? 'yeterli kanıt yok'}.`, 'warn', 9000);
+    return false;
+  }
+  currentArch = result.arch;
+  if (jaw() === 'lower') trackMandible(v, currentArch, autoSlice());
+  $<HTMLInputElement>('in-tracking').disabled = !currentArch.panorama;
+  seedControls(); saveJaw(); centerS = currentArch.length / 2; crossImgs.length = 0;
+  refresh();
+  setCaseInfo(`${caseSummary()} · ${jaw() === 'upper' ? 'Üst' : 'Alt'} çene arch'ı (oklüzal B-spline)`);
+  toast(`Oklüzal B-spline uygulandı · kanıt %${(result.assessment!.supportFraction * 100).toFixed(0)}`, 'ok', 5000);
   return true;
 }
 
@@ -595,7 +628,7 @@ function cancelActiveJob() {
 }
 
 /** Wait for the mandible AI result using the live stream, with slow polling as a safety net. */
-async function runAi(datasetId: string, token: number): Promise<Uint8Array> {
+async function runAi(datasetId: string, token: number): Promise<{ mask: Uint8Array; schema: Volume['maskSchema'] }> {
   const start = await fetch(`${API}/api/datasets/${datasetId}/jobs/segment`, { method: 'POST' });
   if (!start.ok) throw new Error(await errorText(start));
   const jobId: string = (await start.json()).jobId; activeJob = jobId;
@@ -634,7 +667,10 @@ async function runAi(datasetId: string, token: number): Promise<Uint8Array> {
   activeJob = '';
   const maskResponse = await fetch(`${API}/api/jobs/${jobId}/mask`);
   if (!maskResponse.ok) throw new Error(await errorText(maskResponse));
-  return new Uint8Array(await maskResponse.arrayBuffer());
+  return {
+    mask: new Uint8Array(await maskResponse.arrayBuffer()),
+    schema: maskResponse.headers.get('X-Segmentation-Schema') === 'dental-segmentator-v1' ? 'dental-segmentator-v1' : 'mandible-v1',
+  };
 }
 
 // ---- case lifecycle -------------------------------------------------------------------------
@@ -680,7 +716,11 @@ async function loadCase(source: Source) {
     stage = 'ai'; loading.stage('ai', 'active', 0, 'Kuyrukta…');
     let aiWarning = '';
     for (let attempt = 0; ; attempt++) {
-      try { vol.mask = await runAi(datasetId, token); loading.stage('ai', 'done'); break; }
+      try {
+        const segmentation = await runAi(datasetId, token);
+        vol.mask = segmentation.mask; vol.maskSchema = segmentation.schema;
+        loading.stage('ai', 'done'); break;
+      }
       catch (error) {
         if (error instanceof Cancelled) throw error;
         if (error instanceof Restarted && attempt < 1) { loading.message('Servis yeniden başladı, vaka yeniden kaydediliyor…'); datasetId = await reopen(source); vol.datasetId = datasetId; loading.message(''); continue; }
@@ -824,7 +864,8 @@ $<HTMLSelectElement>('in-wlpreset').addEventListener('change', (event) => {
   $<HTMLInputElement>('in-wc').value = String(preset.wc); $<HTMLInputElement>('in-ww').value = String(preset.ww);
   $('o-wc').textContent = String(preset.wc); $('o-ww').textContent = String(preset.ww); refreshWindow();
 });
-$('tool-redetect').onclick = () => { if (!volume) return; currentArch = null; controlPoints = []; arches.delete(jaw()); clearDerivedViews(); drawAxial(); detectArch(); };
+$('tool-redetect').onclick = () => { if (!volume) return; void detectArch(); };
+$('tool-occlusal').onclick = () => { if (!volume) return; void detectOcclusalSplineArch(); };
 $('tool-reseed').onclick = () => { if (!currentArch) return; seedControls(); rebuildFromControls(); refresh(); };
 $('tool-export').onclick = () => { const canvas = cvPano.hidden ? cvPanoCpu : cvPano; const a = document.createElement('a'); a.href = canvas.toDataURL('image/png'); a.download = `${jaw()}-panoramic.png`; a.click(); };
 

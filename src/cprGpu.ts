@@ -52,14 +52,26 @@ void main() {
     base.xy += arch.zw * shift / spacing.xy;
   }
   float value = projectionMode == 1 ? -1.0e20 : 0.0;
-  for (int i = -12; i <= 12; ++i) {
+  float weightSum = 0.0;
+  for (int i = -32; i <= 32; ++i) {
     if (abs(i) > samples / 2) continue;
     float offset = samples <= 1 ? 0.0 : float(i) * thickness / float(samples - 1);
     vec3 voxel = base + vec3(arch.z * offset / spacing.x, arch.w * offset / spacing.y, 0.0);
     float current = sampleVolume(voxel);
-    if (projectionMode == 1) value = max(value, current); else value += current;
+    if (projectionMode == 1) {
+      value = max(value, current);
+    } else if (projectionMode == 0) {
+      // Tissue/bone-weighted X-ray projection across a wide panoramic focal trough
+      // prevents oral/external air (-1000 HU) from washing out trabecular bone and roots.
+      float w = clamp((current + 300.0) / 1500.0, 0.05, 1.5);
+      value += current * w;
+      weightSum += w;
+    } else {
+      value += current;
+      weightSum += 1.0;
+    }
   }
-  if (projectionMode == 0) value /= float(samples);
+  if (projectionMode != 1) value /= max(weightSum, 1.0e-6);
   float grey = clamp((value - (windowCenter - windowWidth * 0.5)) / windowWidth, 0.0, 1.0);
   color = vec4(vec3(grey), 1.0);
 }`;
@@ -141,9 +153,9 @@ export class GpuPanoramaRenderer {
   }
 
   /** Draw `columns` curve samples (x, y, slabDirX, slabDirY per column) into the currently bound framebuffer. */
-  private draw(volume: Volume, curve: Float32Array, columns: number, slab: Slab, window: { center: number; width: number }, tracking?: ArchResult['panorama']) {
+  private draw(volume: Volume, curve: Float32Array, columns: number, slab: Slab, window: { center: number; width: number }, tracking?: ArchResult['panorama'], isCross = false) {
     const gl = this.gl!, program = this.program!;
-    const samples = Math.max(1, Math.min(25, 2 * Math.floor((slab.thicknessMm / Math.min(volume.sx, volume.sy)) / 2) + 1));
+    const samples = Math.max(1, Math.min(65, 2 * Math.floor((slab.thicknessMm / Math.min(volume.sx, volume.sy)) / 2) + 1));
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.archTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -164,7 +176,7 @@ export class GpuPanoramaRenderer {
     gl.uniform1f(uniform('thickness'), slab.thicknessMm);
     gl.uniform1f(uniform('windowCenter'), window.center);
     gl.uniform1f(uniform('windowWidth'), window.width);
-    gl.uniform1i(uniform('projectionMode'), slab.mode === 'max' ? 1 : 0);
+    gl.uniform1i(uniform('projectionMode'), slab.mode === 'max' ? 1 : (isCross ? 2 : 0));
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
@@ -218,7 +230,7 @@ export class GpuPanoramaRenderer {
         this.fboSize = [w, h];
       }
       if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); return false; }
-      this.draw(volume, curve, w, slab, window);
+      this.draw(volume, curve, w, slab, window, undefined, true);
       if (this.pixels.length !== w * h * 4) this.pixels = new Uint8Array(w * h * 4);
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.pixels);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);

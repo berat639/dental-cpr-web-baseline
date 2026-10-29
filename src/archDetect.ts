@@ -132,7 +132,7 @@ export async function searchArch(
     // from the jaw. Accept the simpler curve only if the source evidence still
     // supports it; never smooth an arch into a plausible-looking unsupported U.
     const original = selected.arch;
-    for (const handleCount of [9, 11, 13]) {
+    for (const handleCount of [17, 13, 11]) {
       const controls = Array.from({ length: handleCount }, (_, i) => original.points[Math.round(i * (original.points.length - 1) / (handleCount - 1))]);
       const arch = splineArch(controls, original.points.length);
       const ev = assessArchEvidence(arch, chosenEvidence), plaus = assessArchPlausibility(arch, { aiMask: useMandibleMask });
